@@ -1,4 +1,6 @@
+import torch
 import random
+import numpy as np
 from typing import List
 from marketsim.fourheap.constants import BUY, SELL
 from marketsim.market.market import Market
@@ -19,7 +21,15 @@ class Simulator:
                  shock_var=10,
                  q_max: int = 10,
                  pv_var: float = 5e6,
-                 zi_shade: List = [10, 30]):
+                 zi_shade: List = [10, 30],
+                 seed: int | None = None):
+        
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
+        self.seed = seed
         self.num_agents = num_background_agents
         self.num_assets = num_assets
         self.sim_time = sim_time

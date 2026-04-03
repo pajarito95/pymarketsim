@@ -1,4 +1,6 @@
+import torch
 import random
+import numpy as np
 from typing import List, Optional
 from marketsim.market.market import Market
 from marketsim.fundamental.mean_reverting import GaussianMeanReverting
@@ -19,8 +21,15 @@ class Simulator:
                  pv_var: float = 5e6,
                  zi_shade: List = [10, 30],
                  fundamental_type: str = "mean_reverting",
-                 historical_prices: Optional[list] = None):
+                 historical_prices: Optional[list] = None,
+                 seed: int | None = None):
 
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
+        self.seed = seed
         self.num_agents = num_background_agents
         self.num_assets = num_assets
         self.sim_time = sim_time

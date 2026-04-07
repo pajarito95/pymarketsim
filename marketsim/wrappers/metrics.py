@@ -53,30 +53,54 @@ def realized_volatility(market, lookback=20):
     return rv
 
 
+# def relative_strength_index(market, lookback=20):
+#     """
+#     (RSI) is a technical indicator used in momentum trading that measures
+#     the speed of a security’s recent price changes to evaluate overvalued or undervalued
+#     conditions in the price of that security. (Rescaled by 100)
+#     """
+#     midprices = market.get_midprices()
+#     if len(midprices) >= lookback:
+#         prices = np.array(midprices)[-lookback:]
+#         deltas = np.diff(prices)
+#         up = deltas[deltas >= 0].sum() / lookback
+#         down = -deltas[deltas < 0].sum() / lookback
+#     else:
+#         prices = np.array(midprices)
+#         deltas = np.diff(prices)
+#         up = deltas[deltas >= 0].sum() / len(midprices)
+#         down = -deltas[deltas < 0].sum() / len(midprices)
+
+#     if down == 0:
+#         return 100
+
+#     rs = up / down
+#     rsi = 100. - 100. / (1. + rs)
+
+#     return rsi
+
 def relative_strength_index(market, lookback=20):
-    """
-    (RSI) is a technical indicator used in momentum trading that measures
-    the speed of a security’s recent price changes to evaluate overvalued or undervalued
-    conditions in the price of that security. (Rescaled by 100)
-    """
     midprices = market.get_midprices()
+
+    if len(midprices) <= 1:
+        return 50.0  # neutral default
+
     if len(midprices) >= lookback:
         prices = np.array(midprices)[-lookback:]
-        deltas = np.diff(prices)
-        up = deltas[deltas >= 0].sum() / lookback
-        down = -deltas[deltas < 0].sum() / lookback
+        denom = lookback
     else:
         prices = np.array(midprices)
-        deltas = np.diff(prices)
-        up = deltas[deltas >= 0].sum() / len(midprices)
-        down = -deltas[deltas < 0].sum() / len(midprices)
+        denom = len(midprices)
+
+    deltas = np.diff(prices)
+    up = deltas[deltas >= 0].sum() / denom
+    down = -deltas[deltas < 0].sum() / denom
 
     if down == 0:
-        return 100
+        return 100.0
 
     rs = up / down
-    rsi = 100. - 100. / (1. + rs)
-
+    rsi = 100.0 - 100.0 / (1.0 + rs)
     return rsi
 
 
@@ -88,6 +112,3 @@ def midprice_move(market, lookback=20):
         return midprices[-1] - np.mean(midprices[:-1])
     else:
         return 0.0
-
-
-

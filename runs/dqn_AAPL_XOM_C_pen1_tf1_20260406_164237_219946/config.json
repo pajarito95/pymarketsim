@@ -1,0 +1,33 @@
+{
+  "ticker_a": "AAPL",
+  "ticker_b": "XOM",
+  "csv_path": "R:\\sescott1\\Masters\\thesis\\potential_codes\\StockMARL\\Stock-MARL-main\\resources\\datasets\\train_dataV1.csv",
+  "sim_time": 200,
+  "max_decision_events": 100,
+  "num_background_agents": 25,
+  "lam_bg": 0.1,
+  "lam_rl": 0.05,
+  "q_max": 10,
+  "pv_var": 1.0,
+  "zi_shade": [
+    0.05,
+    0.5
+  ],
+  "initial_cash": 100000.0,
+  "lambda_invalid": 1.0,
+  "gamma": 0.99,
+  "lr": 0.0005,
+  "batch_size": 64,
+  "target_update_freq": 1000,
+  "learning_starts": 500,
+  "train_freq": 1,
+  "epsilon_start": 1.0,
+  "epsilon_end": 0.05,
+  "epsilon_decay_steps": 5000,
+  "grad_clip": 10.0,
+  "replay_capacity": 100000,
+  "episodes": 2000,
+  "checkpoint_every": 10,
+  "seed": 42,
+  "run_tag": "C_pen1_tf1"
+}

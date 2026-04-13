@@ -13,6 +13,7 @@ from marketsim.agent.market_maker import MMAgent
 from marketsim.fourheap.constants import BUY, SELL
 from marketsim.fourheap.order import Order
 from marketsim.fundamental.historical import HistoricalFundamental
+from marketsim.fundamental.mean_reverting import GaussianMeanReverting
 from marketsim.market.market import Market
 from marketsim.wrappers.metrics import midprice_move, realized_volatility, relative_strength_index
 
@@ -45,11 +46,16 @@ class MultiAssetEnv(gym.Env):
         seed: int | None = None,
         bg_latency: int = 0,
         rl_latency: int = 0,
+        fundamental_mode: str = "historical",   # "historical" or "synthetic"
+        synthetic_kappa: float = 0.05,          # mean-reversion strength r
+        synthetic_sigma_scale: float = 1.0,     # multiplier on estimated shock variance
     ):
         super().__init__()
 
         if len(historical_series) != 2:
             raise ValueError("historical_series must contain exactly 2 assets.")
+        if fundamental_mode not in {"historical", "synthetic"}:
+            raise ValueError("fundamental_mode must be 'historical' or 'synthetic'.")
 
         if zi_shade is None:
             zi_shade = [0.05, 0.5]
@@ -66,14 +72,21 @@ class MultiAssetEnv(gym.Env):
         self.zi_shade = zi_shade
         self.initial_cash = float(initial_cash)
         self.lambda_invalid = float(lambda_invalid)
+
         self.use_market_makers = bool(use_market_makers)
         self.lam_mm = float(lam_mm)
         self.mm_xi = float(mm_xi)
         self.mm_K = int(mm_K)
         self.mm_omega = float(mm_omega)
+
         self.seed_value = seed
         self.bg_latency = max(0, int(bg_latency))
         self.rl_latency = max(0, int(rl_latency))
+
+        self.fundamental_mode = fundamental_mode
+        self.synthetic_kappa = float(synthetic_kappa)
+        self.synthetic_sigma_scale = float(synthetic_sigma_scale)
+
         self._rl_order_counter = 0
 
         if seed is not None:
@@ -90,11 +103,12 @@ class MultiAssetEnv(gym.Env):
         self.markets: Dict[str, Market] = {}
         self.background_agents: Dict[int, CrossAssetBackgroundAgent] = {}
         self.market_makers: Dict[str, MMAgent] = {}
-        self.mm_agent_ids: Dict[str, int] = {}    
+        self.mm_agent_ids: Dict[str, int] = {}
 
         self.arrivals_mm = defaultdict(list)
         self.arrival_times_mm = None
         self.arrival_idx_mm = 0
+
         self.arrivals_bg = defaultdict(list)
         self.arrival_times_bg = None
         self.arrival_idx_bg = 0
@@ -106,6 +120,9 @@ class MultiAssetEnv(gym.Env):
         self.time = 0
         self.decision_event_count = 0
         self.last_net_worth = None
+
+        # step diagnostics
+        self.last_step_matched_counts = {ticker: 0 for ticker in self.tickers}
 
         # obs = time_left, cash_norm, nw_norm,
         # then per asset:
@@ -121,11 +138,44 @@ class MultiAssetEnv(gym.Env):
 
         self._build_env()
 
+    def _make_fundamental(self, ticker: str):
+        ref_prices = np.asarray(self.historical_series[ticker], dtype=float)
+        ref_prices = ref_prices[~np.isnan(ref_prices)]
+
+        if len(ref_prices) == 0:
+            raise ValueError(f"No valid prices available for ticker {ticker}.")
+
+        if self.fundamental_mode == "historical":
+            return HistoricalFundamental(prices=ref_prices, final_time=self.sim_time)
+
+        # synthetic = Gaussian mean-reverting process calibrated loosely to the
+        # scale of the historical series
+        mean = float(np.mean(ref_prices))
+
+        if len(ref_prices) > 1:
+            log_rets = np.diff(np.log(np.maximum(ref_prices, 1e-8)))
+            ret_var = float(np.var(log_rets))
+            # convert return-scale variation to price-scale shock variance
+            shock_var = ret_var * (mean ** 2)
+        else:
+            shock_var = (0.01 * mean) ** 2
+
+        shock_var = max(shock_var * self.synthetic_sigma_scale, 1e-8)
+
+        # GaussianMeanReverting allocates exactly `final_time` slots, so use
+        # sim_time + 1 to allow indexing from t=0,...,sim_time
+        return GaussianMeanReverting(
+            final_time=self.sim_time + 1,
+            mean=mean,
+            r=self.synthetic_kappa,
+            shock_var=shock_var,
+            shock_mean=0.0,
+        )
+
     def _build_env(self):
         self.markets = {}
         for ticker in self.tickers:
-            prices = self.historical_series[ticker]
-            fundamental = HistoricalFundamental(prices=prices, final_time=self.sim_time)
+            fundamental = self._make_fundamental(ticker)
             self.markets[ticker] = Market(fundamental=fundamental, time_steps=self.sim_time)
 
         self.market_makers = {}
@@ -183,11 +233,11 @@ class MultiAssetEnv(gym.Env):
     def _schedule_next_mm_arrival(self, ticker: str):
         if not self.use_market_makers:
             return
-        
+
         if self.arrival_idx_mm >= len(self.arrival_times_mm):
             self.arrival_times_mm = sample_arrivals_numpy(self.lam_mm, 10000)
             self.arrival_idx_mm = 0
-        
+
         next_t = int(self.arrival_times_mm[self.arrival_idx_mm]) + 1 + self.time
         self.arrivals_mm[next_t].append(ticker)
         self.arrival_idx_mm += 1
@@ -208,17 +258,16 @@ class MultiAssetEnv(gym.Env):
             market.add_orders(orders)
 
             self._schedule_next_mm_arrival(ticker)
-    
+
     def _seed_market_makers_at_t0(self):
         if not self.use_market_makers:
             return
-        
+
         for ticker, mm in self.market_makers.items():
             market = self.markets[ticker]
             market.event_queue.set_time(0)
 
             market.withdraw_all(mm.get_id())
-
             orders = mm.take_action()
             market.add_orders(orders)
 
@@ -244,6 +293,7 @@ class MultiAssetEnv(gym.Env):
         self.last_net_worth = self._get_net_worth()
 
         self._rl_order_counter = 0
+        self.last_step_matched_counts = {ticker: 0 for ticker in self.tickers}
 
         return self._get_obs(), {}
 
@@ -317,7 +367,6 @@ class MultiAssetEnv(gym.Env):
         submitted_order_id : int | None
             The RL order id if submitted, else None
         """
-        # cancel any prior RL resting orders before taking a new action
         self._cancel_rl_orders()
 
         if action == 0:
@@ -405,10 +454,12 @@ class MultiAssetEnv(gym.Env):
 
     def _process_all_markets_for_current_time(self):
         rl_filled_order_ids = set()
+        self.last_step_matched_counts = {ticker: 0 for ticker in self.tickers}
 
         for ticker, market in self.markets.items():
             market.event_queue.set_time(self.time)
             new_orders = market.step()
+            self.last_step_matched_counts[ticker] = len(new_orders)
 
             for matched_order in new_orders:
                 agent_id = matched_order.order.agent_id
@@ -489,7 +540,7 @@ class MultiAssetEnv(gym.Env):
             vol = self._safe_metric(realized_volatility, market)
             rsi = self._safe_metric(relative_strength_index, market) / 100.0
 
-            scale = max(self.historical_series[ticker][0], 1e-8)
+            scale = max(float(self.historical_series[ticker][0]), 1e-8)
 
             obs.extend([
                 fundamental / scale,
@@ -500,7 +551,101 @@ class MultiAssetEnv(gym.Env):
                 vol,
                 rsi,
             ])
-        
+
         obs = np.asarray(obs, dtype=np.float32)
         obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
         return np.asarray(obs, dtype=np.float32)
+
+    # ------------------------------------------------------------------
+    # Snapshot helpers for logging / later distributional analysis
+    # ------------------------------------------------------------------
+
+    def get_market_snapshot(self, episode: int | None = None) -> List[dict]:
+        rows = []
+        for ticker, market in self.markets.items():
+            bid = market.order_book.get_best_bid()
+            ask = market.order_book.get_best_ask()
+            bid_out = None if math.isinf(bid) else float(bid)
+            ask_out = None if math.isinf(ask) else float(ask)
+
+            if bid_out is not None and ask_out is not None:
+                mid = 0.5 * (bid_out + ask_out)
+                spread = ask_out - bid_out
+            else:
+                mid = float(market.get_fundamental_value())
+                spread = None
+
+            rows.append({
+                "episode": episode,
+                "time": int(self.time),
+                "ticker": ticker,
+                "fundamental_mode": self.fundamental_mode,
+                "fundamental": float(market.get_fundamental_value()),
+                "best_bid": bid_out,
+                "best_ask": ask_out,
+                "midprice": float(mid),
+                "spread": spread,
+                "matched_orders": int(self.last_step_matched_counts.get(ticker, 0)),
+            })
+        return rows
+
+    def get_agent_snapshot(self, episode: int | None = None) -> List[dict]:
+        rows = []
+        marks = self._mark_prices()
+
+        # RL agent
+        rl_row = {
+            "episode": episode,
+            "time": int(self.time),
+            "agent_id": int(self.rl_agent_id),
+            "agent_type": "rl",
+            "latency": int(self.rl_latency),
+            "cash": float(self.rl_agent.cash),
+            "net_worth": float(self.rl_agent.net_worth(marks)),
+        }
+        for ticker in self.tickers:
+            inv = int(self.rl_agent.get_inventory(ticker))
+            rl_row[f"{ticker}_holdings"] = inv
+            rl_row[f"participates_{ticker}"] = int(inv > 0)
+        rows.append(rl_row)
+
+        # Background agents
+        for agent_id, agent in self.background_agents.items():
+            row = {
+                "episode": episode,
+                "time": int(self.time),
+                "agent_id": int(agent_id),
+                "agent_type": "background",
+                "latency": int(getattr(agent, "latency", 0)),
+                "cash": float(agent.cash),
+                "net_worth": float(agent.net_worth(marks)),
+            }
+            for ticker in self.tickers:
+                inv = int(agent.inventory[ticker])
+                row[f"{ticker}_holdings"] = inv
+                row[f"participates_{ticker}"] = int(inv > 0)
+            rows.append(row)
+
+        # Market makers
+        if self.use_market_makers:
+            for ticker, mm in self.market_makers.items():
+                mark = marks[ticker]
+                position = int(mm.position)
+                net_worth = float(mm.cash + position * mark)
+
+                row = {
+                    "episode": episode,
+                    "time": int(self.time),
+                    "agent_id": int(mm.get_id()),
+                    "agent_type": "market_maker",
+                    "latency": 0,
+                    "cash": float(mm.cash),
+                    "net_worth": net_worth,
+                }
+                for tk in self.tickers:
+                    inv = position if tk == ticker else 0
+                    row[f"{tk}_holdings"] = int(inv)
+                    row[f"participates_{tk}"] = int(inv > 0)
+                rows.append(row)
+
+        return rows

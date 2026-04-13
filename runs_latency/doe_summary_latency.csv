@@ -1,0 +1,5 @@
+condition,run_tag,lambda_invalid,train_freq,mean_return_first,mean_return_last,mean_invalid_first,mean_invalid_last,best_episode_return,mean_steps_last
+Latency,C_pen1_tf1_lat1,1.0,1,-12.792388697765709,13.049794556953275,2.13,0.15,44.62741088154144,9.8
+Latency,A_pen1_tf4_lat1,1.0,4,-14.632538661774742,9.135640121597826,2.27,2.24,32.84879185415048,9.8
+Latency,D_pen2_tf1_lat1,2.0,1,-16.55955305796684,12.309178949312336,1.97,0.2,46.116833958090865,9.8
+Latency,B_pen2_tf4_lat1,2.0,4,-17.259819519731682,7.841294044782116,2.35,0.35,32.10502284867107,9.8

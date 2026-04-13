@@ -9,6 +9,7 @@ from gymnasium import spaces
 
 from marketsim.agent.cross_asset_background_agent import CrossAssetBackgroundAgent
 from marketsim.agent.rl_participation_agent import RLParticipationAgent
+from marketsim.agent.market_maker import MMAgent
 from marketsim.fourheap.constants import BUY, SELL
 from marketsim.fourheap.order import Order
 from marketsim.fundamental.historical import HistoricalFundamental
@@ -36,6 +37,11 @@ class MultiAssetEnv(gym.Env):
         zi_shade: List[float] | None = None,
         initial_cash: float = 100_000.0,
         lambda_invalid: float = 1.0,
+        use_market_makers: bool = True,
+        lam_mm: float = 0.10,
+        mm_xi: float = 0.5,
+        mm_K: int = 3,
+        mm_omega: float = 2.0,
         seed: int | None = None,
         bg_latency: int = 0,
         rl_latency: int = 0,
@@ -60,9 +66,15 @@ class MultiAssetEnv(gym.Env):
         self.zi_shade = zi_shade
         self.initial_cash = float(initial_cash)
         self.lambda_invalid = float(lambda_invalid)
+        self.use_market_makers = bool(use_market_makers)
+        self.lam_mm = float(lam_mm)
+        self.mm_xi = float(mm_xi)
+        self.mm_K = int(mm_K)
+        self.mm_omega = float(mm_omega)
         self.seed_value = seed
         self.bg_latency = max(0, int(bg_latency))
         self.rl_latency = max(0, int(rl_latency))
+        self._rl_order_counter = 0
 
         if seed is not None:
             random.seed(seed)
@@ -77,7 +89,12 @@ class MultiAssetEnv(gym.Env):
 
         self.markets: Dict[str, Market] = {}
         self.background_agents: Dict[int, CrossAssetBackgroundAgent] = {}
+        self.market_makers: Dict[str, MMAgent] = {}
+        self.mm_agent_ids: Dict[str, int] = {}    
 
+        self.arrivals_mm = defaultdict(list)
+        self.arrival_times_mm = None
+        self.arrival_idx_mm = 0
         self.arrivals_bg = defaultdict(list)
         self.arrival_times_bg = None
         self.arrival_idx_bg = 0
@@ -111,6 +128,32 @@ class MultiAssetEnv(gym.Env):
             fundamental = HistoricalFundamental(prices=prices, final_time=self.sim_time)
             self.markets[ticker] = Market(fundamental=fundamental, time_steps=self.sim_time)
 
+        self.market_makers = {}
+        self.mm_agent_ids = {}
+        if self.use_market_makers:
+            for idx, ticker in enumerate(self.tickers):
+                mm_id = 800_000 + idx
+                self.mm_agent_ids[ticker] = mm_id
+                self.market_makers[ticker] = MMAgent(
+                    agent_id=mm_id,
+                    market=self.markets[ticker],
+                    xi=self.mm_xi,
+                    K=self.mm_K,
+                    omega=self.mm_omega,
+                )
+
+        self.arrivals_mm = defaultdict(list)
+        if self.use_market_makers:
+            self.arrival_times_mm = sample_arrivals_numpy(self.lam_mm, 10000)
+            self.arrival_idx_mm = 0
+            for ticker in self.tickers:
+                next_t = int(self.arrival_times_mm[self.arrival_idx_mm]) + 1
+                self.arrivals_mm[next_t].append(ticker)
+                self.arrival_idx_mm += 1
+        else:
+            self.arrival_times_mm = None
+            self.arrival_idx_mm = 0
+
         self.background_agents = {}
         for agent_id in range(self.num_background_agents):
             self.background_agents[agent_id] = CrossAssetBackgroundAgent(
@@ -137,6 +180,54 @@ class MultiAssetEnv(gym.Env):
         self.arrivals_rl[int(self.arrival_times_rl[self.arrival_idx_rl])].append(self.rl_agent_id)
         self.arrival_idx_rl += 1
 
+    def _schedule_next_mm_arrival(self, ticker: str):
+        if not self.use_market_makers:
+            return
+        
+        if self.arrival_idx_mm >= len(self.arrival_times_mm):
+            self.arrival_times_mm = sample_arrivals_numpy(self.lam_mm, 10000)
+            self.arrival_idx_mm = 0
+        
+        next_t = int(self.arrival_times_mm[self.arrival_idx_mm]) + 1 + self.time
+        self.arrivals_mm[next_t].append(ticker)
+        self.arrival_idx_mm += 1
+
+    def _process_market_makers_for_current_time(self):
+        if not self.use_market_makers:
+            return
+
+        tickers_now = self.arrivals_mm[self.time]
+        for ticker in tickers_now:
+            mm = self.market_makers[ticker]
+            market = self.markets[ticker]
+
+            market.event_queue.set_time(self.time)
+            market.withdraw_all(mm.get_id())
+
+            orders = mm.take_action()
+            market.add_orders(orders)
+
+            self._schedule_next_mm_arrival(ticker)
+    
+    def _seed_market_makers_at_t0(self):
+        if not self.use_market_makers:
+            return
+        
+        for ticker, mm in self.market_makers.items():
+            market = self.markets[ticker]
+            market.event_queue.set_time(0)
+
+            market.withdraw_all(mm.get_id())
+
+            orders = mm.take_action()
+            market.add_orders(orders)
+
+        self._process_all_markets_for_current_time()
+
+    def _cancel_rl_orders(self):
+        for market in self.markets.values():
+            market.withdraw_all(self.rl_agent_id)
+
     def reset(self, seed=None, options=None):
         if seed is not None:
             random.seed(seed)
@@ -147,8 +238,12 @@ class MultiAssetEnv(gym.Env):
         self.rl_agent.reset()
         self._build_env()
 
+        self._seed_market_makers_at_t0()
+
         self._advance_to_next_rl_event()
         self.last_net_worth = self._get_net_worth()
+
+        self._rl_order_counter = 0
 
         return self._get_obs(), {}
 
@@ -158,14 +253,18 @@ class MultiAssetEnv(gym.Env):
 
         nw_before = self._get_net_worth()
         invalid = 0
+        order_submitted = 0
+        submitted_order_id = None
 
         if self.rl_agent_id in self.arrivals_rl[self.time]:
-            invalid = self._execute_rl_action(action)
+            invalid, order_submitted, submitted_order_id = self._execute_rl_action(action)
             self._schedule_next_rl_arrival()
 
+        self._process_market_makers_for_current_time()
         self._process_background_agents_for_current_time()
-        self._process_all_markets_for_current_time()
+        rl_filled_order_ids = self._process_all_markets_for_current_time()
 
+        order_filled = int(submitted_order_id is not None and submitted_order_id in rl_filled_order_ids)
         self.time += 1
         self.decision_event_count += 1
 
@@ -176,11 +275,16 @@ class MultiAssetEnv(gym.Env):
         self.last_net_worth = nw_after
 
         terminated = done or (self.decision_event_count >= self.max_decision_events)
-        return self._get_obs(), float(reward), terminated, False, {
+
+        info = {
             "net_worth": nw_after,
             "invalid_action": invalid,
             "time": self.time,
+            "order_submitted": order_submitted,
+            "order_filled": order_filled,
         }
+
+        return self._get_obs(), float(reward), terminated, False, info
 
     def _schedule_next_bg_arrival(self, agent_id: int):
         if self.arrival_idx_bg >= len(self.arrival_times_bg):
@@ -200,9 +304,24 @@ class MultiAssetEnv(gym.Env):
         self.arrivals_rl[next_t].append(self.rl_agent_id)
         self.arrival_idx_rl += 1
 
-    def _execute_rl_action(self, action: int) -> int:
+    def _execute_rl_action(self, action: int):
+        """
+        Submit the RL action as a real limit order into the LOB.
+
+        Returns
+        -------
+        invalid : int
+            1 if the action is invalid, else 0
+        order_submitted : int
+            1 if an RL order was submitted to the book, else 0
+        submitted_order_id : int | None
+            The RL order id if submitted, else None
+        """
+        # cancel any prior RL resting orders before taking a new action
+        self._cancel_rl_orders()
+
         if action == 0:
-            return 0
+            return 0, 0, None
 
         if action == 1:
             ticker = self.tickers[0]
@@ -217,34 +336,56 @@ class MultiAssetEnv(gym.Env):
             ticker = self.tickers[1]
             side = SELL
         else:
-            return 1
+            return 1, 0, None
 
         market = self.markets[ticker]
-        obs = self._get_rl_market_observation(ticker)
-        book = obs["book"]
+        market.event_queue.set_time(self.time)
 
         best_ask = market.order_book.get_best_ask()
         best_bid = market.order_book.get_best_bid()
-        fallback_price = market.get_fundamental_value()
+        fundamental = market.get_fundamental_value()
 
         if side == BUY:
-            exec_price = best_ask if not math.isinf(best_ask) else fallback_price
-            if self.rl_agent.cash < exec_price:
-                return 1
+            if not math.isinf(best_ask):
+                limit_price = float(best_ask)
+            elif not math.isinf(best_bid):
+                limit_price = float(best_bid)
+            else:
+                limit_price = float(fundamental)
 
-            # direct execution
-            self.rl_agent.update_position(ticker, 1, -float(exec_price))
-            return 0
+            if self.rl_agent.cash < limit_price:
+                return 1, 0, None
 
-        else:
+            quantity = 1
+
+        else:  # SELL
             if self.rl_agent.get_inventory(ticker) <= 0:
-                return 1
+                return 1, 0, None
 
-            exec_price = best_bid if not math.isinf(best_bid) else fallback_price
+            if not math.isinf(best_bid):
+                limit_price = float(best_bid)
+            elif not math.isinf(best_ask):
+                limit_price = float(best_ask)
+            else:
+                limit_price = float(fundamental)
 
-            # direct execution
-            self.rl_agent.update_position(ticker, -1, float(exec_price))
-            return 0
+            quantity = 1
+
+        self._rl_order_counter += 1
+        order_id = self.rl_agent_id * 1_000_000 + self._rl_order_counter
+
+        order = Order(
+            price=limit_price,
+            quantity=quantity,
+            agent_id=self.rl_agent_id,
+            time=self.time,
+            order_type=side,
+            order_id=order_id,
+        )
+
+        market.add_orders([order])
+
+        return 0, 1, order_id
 
     def _process_background_agents_for_current_time(self):
         agents = self.arrivals_bg[self.time]
@@ -263,6 +404,8 @@ class MultiAssetEnv(gym.Env):
             self._schedule_next_bg_arrival(agent_id)
 
     def _process_all_markets_for_current_time(self):
+        rl_filled_order_ids = set()
+
         for ticker, market in self.markets.items():
             market.event_queue.set_time(self.time)
             new_orders = market.step()
@@ -274,11 +417,19 @@ class MultiAssetEnv(gym.Env):
 
                 if agent_id == self.rl_agent_id:
                     self.rl_agent.update_position(ticker, quantity, cash_delta)
-                else:
+                    rl_filled_order_ids.add(matched_order.order.order_id)
+
+                elif agent_id in self.background_agents:
                     self.background_agents[agent_id].update_position(ticker, quantity, cash_delta)
+
+                elif self.use_market_makers and agent_id in self.mm_agent_ids.values():
+                    self.market_makers[ticker].update_position(quantity, cash_delta)
+
+        return rl_filled_order_ids
 
     def _advance_to_next_rl_event(self) -> bool:
         while self.time < self.sim_time and len(self.arrivals_rl[self.time]) == 0:
+            self._process_market_makers_for_current_time()
             self._process_background_agents_for_current_time()
             self._process_all_markets_for_current_time()
             self.time += 1

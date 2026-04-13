@@ -86,6 +86,11 @@ def train(
     checkpoint_every=10,
     seed=42,
     run_tag=None,
+    use_market_makers=False,
+    lam_mm=0.10,
+    mm_xi=0.5,
+    mm_K=3,
+    mm_omega=2.0,
 ):
     csv_path = r"R:\sescott1\Masters\thesis\potential_codes\StockMARL\Stock-MARL-main\resources\datasets\train_dataV1.csv"
     historical_series = load_two_asset_series(
@@ -136,6 +141,11 @@ def train(
         "checkpoint_every": checkpoint_every,
         "seed": seed,
         "run_tag": run_tag,
+        "use_market_makers": use_market_makers,
+        "lam_mm": lam_mm,
+        "mm_xi": mm_xi,
+        "mm_K": mm_K,
+        "mm_omega": mm_omega,
     }
 
     with open(os.path.join(out_dir, "config.json"), "w", encoding="utf-8") as f:
@@ -153,9 +163,14 @@ def train(
         zi_shade=list(zi_shade),
         initial_cash=initial_cash,
         lambda_invalid=lambda_invalid,
-        seed=seed,
         bg_latency=bg_latency,
         rl_latency=rl_latency,
+        use_market_makers=use_market_makers,
+        lam_mm=lam_mm,
+        mm_xi=mm_xi,
+        mm_K=mm_K,
+        mm_omega=mm_omega,
+        seed=seed,
     )
 
     state_dim = env.observation_space.shape[0]

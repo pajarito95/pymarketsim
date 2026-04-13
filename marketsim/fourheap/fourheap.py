@@ -175,7 +175,37 @@ class FourHeap:
         else:
             self.midprices.append((best_ask + best_bid) / 2)
 
+    def snapshot_top_of_book(self) -> dict:
+        """
+        Lightweight snapshot of current visible top-of-book state.
+        Safe for latency/history logging.
+        """
+        best_bid = self.get_best_bid()
+        best_ask = self.get_best_ask()
 
+        return {
+            "best_bid": None if math.isinf(best_bid) else float(best_bid),
+            "best_ask": None if math.isinf(best_ask) else float(best_ask),
+            "n_buy_unmatched": int(self.buy_unmatched.count()),
+            "n_sell_unmatched": int(self.sell_unmatched.count()),
+            "n_buy_matched": int(self.buy_matched.count()),
+            "n_sell_matched": int(self.sell_matched.count()),
+            "midprice": float(self.midprices[-1]) if len(self.midprices) > 0 else None,
+        }
+
+    def snapshot_depth(self) -> dict:
+        """
+        Slightly richer but still lightweight snapshot.
+        Useful if you later want to analyze stale-book usage beyond best bid/ask.
+        """
+        return {
+            "buy_unmatched_count": int(self.buy_unmatched.count()),
+            "sell_unmatched_count": int(self.sell_unmatched.count()),
+            "buy_matched_count": int(self.buy_matched.count()),
+            "sell_matched_count": int(self.sell_matched.count()),
+            "best_bid": None if math.isinf(self.get_best_bid()) else float(self.get_best_bid()),
+            "best_ask": None if math.isinf(self.get_best_ask()) else float(self.get_best_ask()),
+        }
 
     def observe(self) -> str:
         s = '--------------\n'

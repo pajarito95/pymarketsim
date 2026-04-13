@@ -1,0 +1,9 @@
+{
+  "episodes": 2000,
+  "mean_return_first": -16.55955305796684,
+  "mean_return_last": 12.309178949312336,
+  "mean_invalid_first": 1.97,
+  "mean_invalid_last": 0.2,
+  "best_episode_return": 46.116833958090865,
+  "mean_steps_last": 9.8
+}

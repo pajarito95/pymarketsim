@@ -1,0 +1,5 @@
+condition,run_tag,lambda_invalid,train_freq,mean_return_first,mean_return_last,mean_invalid_first,mean_invalid_last,best_episode_return,mean_steps_last
+No latency,C_pen1_tf1,1.0,1,-11.514600170767372,12.762303332007724,2.28,0.15,54.398792238833266,9.8
+No latency,A_pen1_tf4,1.0,4,-16.909656084992893,4.115037969916302,2.19,3.06,26.513768810546026,9.8
+No latency,D_pen2_tf1,2.0,1,-17.07645230331138,11.08295596751923,1.95,0.16,44.79500735005422,9.8
+No latency,B_pen2_tf4,2.0,4,-17.048012790889334,8.857072128120489,2.21,0.19,39.8546505527338,9.8

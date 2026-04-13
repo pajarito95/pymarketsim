@@ -306,12 +306,13 @@ class MultiAssetEnv(gym.Env):
         order_submitted = 0
         submitted_order_id = None
 
+        self._process_market_makers_for_current_time()
+        self._process_background_agents_for_current_time()
+
         if self.rl_agent_id in self.arrivals_rl[self.time]:
             invalid, order_submitted, submitted_order_id = self._execute_rl_action(action)
             self._schedule_next_rl_arrival()
 
-        self._process_market_makers_for_current_time()
-        self._process_background_agents_for_current_time()
         rl_filled_order_ids = self._process_all_markets_for_current_time()
 
         order_filled = int(submitted_order_id is not None and submitted_order_id in rl_filled_order_ids)

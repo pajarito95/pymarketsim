@@ -1,0 +1,12 @@
+{
+  "AAPL_avg_spread": 1.1428784869316542,
+  "AAPL_midprice_vol": 0.04623511837625301,
+  "AAPL_total_matched_orders": 1896,
+  "XOM_avg_spread": 1.5637422914507735,
+  "XOM_midprice_vol": 0.06958191117728718,
+  "XOM_total_matched_orders": 1570,
+  "final_mean_participates_AAPL": 0.14285714285714285,
+  "final_mean_participates_XOM": 0.07142857142857142,
+  "final_mean_net_worth_all_agents": 92857.12279854565,
+  "final_std_net_worth_all_agents": 25748.866788138057
+}

@@ -37,3 +37,23 @@ def load_two_asset_series(
         ticker_a: prices_a[:n],
         ticker_b: prices_b[:n],
     }
+
+def load_multi_asset_series(
+    csv_path: str,
+    tickers: list[str],
+    sim_time: int = 500,
+) -> dict[str, np.ndarray]:
+    if len(tickers) == 0:
+        raise ValueError("tickers must contain at least one ticker")
+    
+    series = {}
+    lengths = []
+
+    for ticker in tickers:
+        prices = load_stockmarl_close_series(csv_path, ticker=ticker)
+        series[ticker] = prices
+        lengths.append(len(prices))
+
+    n = min(min(lengths), sim_time + 1)
+
+    return {ticker: prices[:n] for ticker, prices in series.items()}

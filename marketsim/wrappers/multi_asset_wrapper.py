@@ -52,8 +52,8 @@ class MultiAssetEnv(gym.Env):
     ):
         super().__init__()
 
-        if len(historical_series) != 2:
-            raise ValueError("historical_series must contain exactly 2 assets.")
+        if len(historical_series) < 1:
+            raise ValueError("historical_series must contain at least 1 asset.")
         if fundamental_mode not in {"historical", "synthetic"}:
             raise ValueError("fundamental_mode must be 'historical' or 'synthetic'.")
 
@@ -127,14 +127,15 @@ class MultiAssetEnv(gym.Env):
         # obs = time_left, cash_norm, nw_norm,
         # then per asset:
         # fundamental, best_bid, best_ask, inv_norm, midprice_move, volatility, rsi
-        obs_dim = 3 + 2 * 7
+        obs_dim = 3 + len(self.tickers) * 7  # 3 + 2 * 7
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
             shape=(obs_dim,),
             dtype=np.float32,
         )
-        self.action_space = spaces.Discrete(5)
+        #self.action_space = spaces.Discrete(5)
+        self.action_space = spaces.Discrete(1 + 2 * len(self.tickers))
 
         self._build_env()
 
@@ -373,20 +374,27 @@ class MultiAssetEnv(gym.Env):
         if action == 0:
             return 0, 0, None
 
-        if action == 1:
-            ticker = self.tickers[0]
-            side = BUY
-        elif action == 2:
-            ticker = self.tickers[0]
-            side = SELL
-        elif action == 3:
-            ticker = self.tickers[1]
-            side = BUY
-        elif action == 4:
-            ticker = self.tickers[1]
-            side = SELL
-        else:
+        # if action == 1:
+        #     ticker = self.tickers[0]
+        #     side = BUY
+        # elif action == 2:
+        #     ticker = self.tickers[0]
+        #     side = SELL
+        # elif action == 3:
+        #     ticker = self.tickers[1]
+        #     side = BUY
+        # elif action == 4:
+        #     ticker = self.tickers[1]
+        #     side = SELL
+        # else:
+        #     return 1, 0, None
+        
+        asset_idx = (action - 1) // 2
+        if asset_idx < 0 or asset_idx >= len(self.tickers):
             return 1, 0, None
+        
+        ticker = self.tickers[asset_idx]
+        side = BUY if (action - 1) % 2 == 0 else SELL
 
         market = self.markets[ticker]
         market.event_queue.set_time(self.time)

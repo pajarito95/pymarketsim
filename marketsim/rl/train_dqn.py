@@ -7,7 +7,9 @@ from typing import Dict, Any, List
 import numpy as np
 import torch
 
-from marketsim.data.load_historical import load_two_asset_series
+
+from marketsim.data.load_historical import load_multi_asset_series
+#from marketsim.data.load_historical import load_two_asset_series
 from marketsim.rl.dqn_agent import DQNAgent, DQNConfig
 from marketsim.rl.replay_buffer import ReplayBuffer
 from marketsim.wrappers.multi_asset_wrapper import MultiAssetEnv
@@ -123,8 +125,9 @@ def derive_run_metrics(
 
 
 def train(
-    ticker_a="AAPL",
-    ticker_b="XOM",
+    #ticker_a="AAPL",
+    #ticker_b="XOM",
+    tickers: list[str] | None = None,
     sim_time=200,
     max_decision_events=100,
     num_background_agents=25,
@@ -166,10 +169,19 @@ def train(
 ):
     csv_path = r"R:\sescott1\Masters\thesis\potential_codes\StockMARL\Stock-MARL-main\resources\datasets\train_dataV1.csv"
 
-    historical_series = load_two_asset_series(
+    if tickers is None:
+        tickers = ["AAPL", "XOM"]
+
+    # historical_series = load_two_asset_series(
+    #     csv_path=csv_path,
+    #     ticker_a=ticker_a,
+    #     ticker_b=ticker_b,
+    #     sim_time=sim_time,
+    # )
+
+    historical_series = load_multi_asset_series(
         csv_path=csv_path,
-        ticker_a=ticker_a,
-        ticker_b=ticker_b,
+        tickers = tickers,
         sim_time=sim_time,
     )
 
@@ -177,15 +189,18 @@ def train(
     if run_tag is None:
         run_tag = "manual"
 
-    run_name = f"dqn_{ticker_a}_{ticker_b}_{run_tag}_{timestamp}"
+    #run_name = f"dqn_{ticker_a}_{ticker_b}_{run_tag}_{timestamp}"
+    ticker_tag = "_".join(tickers)
+    run_name = f"dqn_{ticker_tag}_{run_tag}_{timestamp}"
     out_dir = os.path.join(output_root, run_name)
     ensure_dir(out_dir)
 
     print("Saving outputs to:", os.path.abspath(out_dir))
 
     config_record = {
-        "ticker_a": ticker_a,
-        "ticker_b": ticker_b,
+        #"ticker_a": ticker_a,
+        #"ticker_b": ticker_b,
+        "tickers": tickers,
         "csv_path": csv_path,
         "sim_time": sim_time,
         "max_decision_events": max_decision_events,
@@ -405,8 +420,9 @@ def run_rl_parameter_doe(output_root="runs_rl_param"):
     (c) RL parameter sensitivity.
     """
     base_kwargs = dict(
-        ticker_a="AAPL",
-        ticker_b="XOM",
+        #ticker_a="AAPL",
+        #ticker_b="XOM",
+        tickers=["AAPL", "META", "V", "XOM"],
         sim_time=200,
         max_decision_events=100,
         num_background_agents=25,
@@ -450,8 +466,9 @@ def run_latency_doe(output_root="runs_latency"):
     (b) latency vs no latency, keeping historical fundamental.
     """
     base_kwargs = dict(
-        ticker_a="AAPL",
-        ticker_b="XOM",
+        #icker_a="AAPL",
+        #ticker_b="XOM",
+        tickers=["AAPL", "META", "V", "XOM"],
         sim_time=200,
         max_decision_events=100,
         num_background_agents=25,
@@ -494,8 +511,9 @@ def run_fundamental_doe(output_root="runs_fundamental"):
     Uses a fixed RL setting.
     """
     base_kwargs = dict(
-        ticker_a="AAPL",
-        ticker_b="XOM",
+        #ticker_a="AAPL",
+        #ticker_b="XOM",
+        tickers=["AAPL", "META", "V", "XOM"],
         sim_time=200,
         max_decision_events=100,
         num_background_agents=25,
@@ -538,8 +556,9 @@ def run_fundamental_latency_doe(output_root="runs_fundamental_latency"):
     (d) combination of (a) and (b): historical/synthetic x latency/no-latency
     """
     base_kwargs = dict(
-        ticker_a="AAPL",
-        ticker_b="XOM",
+        #ticker_a="AAPL",
+        #ticker_b="XOM",
+        tickers=["AAPL", "META", "V", "XOM"],
         sim_time=200,
         max_decision_events=100,
         num_background_agents=25,

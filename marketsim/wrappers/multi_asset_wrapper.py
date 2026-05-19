@@ -12,15 +12,17 @@ from marketsim.agent.rl_participation_agent import RLParticipationAgent
 from marketsim.agent.market_maker import MMAgent
 from marketsim.fourheap.constants import BUY, SELL
 from marketsim.fourheap.order import Order
-from marketsim.fundamental.historical import HistoricalFundamental
+from marketsim.fundamental.historical import HistoricalFundamental, ConstantHistoricalFundamental, HistoricalPiecewiseFundamental, HistoricalInterpolatedDriftFundamental
 from marketsim.fundamental.mean_reverting import GaussianMeanReverting
 from marketsim.market.market import Market
 from marketsim.wrappers.metrics import midprice_move, realized_volatility, relative_strength_index
 
+import torch.distributions as dist
+import torch
 
-def sample_arrivals_numpy(p: float, num_samples: int) -> np.ndarray:
-    return np.random.geometric(p, size=num_samples) - 1
-
+def sample_arrivals(p, num_samples):
+    geometric_dist = dist.Geometric(torch.tensor([p]))
+    return geometric_dist.sample((num_samples,)).squeeze()  # Returns a tensor of 10000 sampled time steps
 
 class MultiAssetEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -29,34 +31,47 @@ class MultiAssetEnv(gym.Env):
         self,
         historical_series: Dict[str, np.ndarray],
         sim_time: int,
-        max_decision_events: int = 200,
+        max_decision_events: int = 975,
         num_background_agents: int = 50,
-        lam_bg: float = 0.10,
-        lam_rl: float = 0.05,
+        lam_bg: float = 0.14,
+        lam_rl: float = 0.07,
         q_max: int = 10,
         pv_var: float = 1.0,
         zi_shade: List[float] | None = None,
         initial_cash: float = 100_000.0,
         lambda_invalid: float = 1.0,
         use_market_makers: bool = True,
-        lam_mm: float = 0.10,
+        lam_mm: float = 0.14,
         mm_xi: float = 0.5,
         mm_K: int = 3,
         mm_omega: float = 2.0,
         seed: int | None = None,
         bg_latency: int = 0,
         rl_latency: int = 0,
+        bg_latency_mode: str = "fixed",  # "fixed" or "stochastic"
+        rl_latency_mode: str = "fixed",  # "fixed" or "stochastic"
+        latency_n: int = 1000,  # number of trials for binomial distribution if latency_mode is "stochastic"
+        bg_latency_p: float = 0.08,  # probability of latency occurring for each trial if bg_latency_mode is "stochastic"
+        rl_latency_p: float = 0.08,  # probability of latency occurring for each trial if rl_latency_mode is "stochastic"
         fundamental_mode: str = "historical",   # "historical" or "synthetic"
-        synthetic_kappa: float = 0.05,          # mean-reversion strength r
-        synthetic_sigma_scale: float = 1.0,     # multiplier on estimated shock variance
+        historical_selected_idx: int = 0,
+        # synthetic_kappa: float = 0.05,  # mean-reversion strength r
+        # synthetic_sigma_scale: float = 1.0,  # multiplier on estimated shock variance
+        # historical_bundle_size: int = 390,
+        # interp_kappa: float = 0.05,
+        # interp_sigma_scale: float = 0.02,
+        fundamental_weight: float = 1.0,
     ):
         super().__init__()
 
         if len(historical_series) < 1:
             raise ValueError("historical_series must contain at least 1 asset.")
-        if fundamental_mode not in {"historical", "synthetic"}:
-            raise ValueError("fundamental_mode must be 'historical' or 'synthetic'.")
-
+        if fundamental_mode not in {"historical", "historical_constant", "historical_piecewise", "historical_interpolated", "synthetic",}:
+            raise ValueError("fundamental_mode must be one of " "{'historical', 'historical_constant', 'historical_piecewise', 'historical_interpolated', 'synthetic'}.")
+        if bg_latency_mode not in {"fixed", "stochastic"}:
+            raise ValueError("bg_latency_mode must be 'fixed' or 'stochastic'.")
+        if rl_latency_mode not in {"fixed", "stochastic"}:
+            raise ValueError("rl_latency_mode must be 'fixed' or 'stochastic'.")
         if zi_shade is None:
             zi_shade = [0.05, 0.5]
 
@@ -72,33 +87,37 @@ class MultiAssetEnv(gym.Env):
         self.zi_shade = zi_shade
         self.initial_cash = float(initial_cash)
         self.lambda_invalid = float(lambda_invalid)
-
         self.use_market_makers = bool(use_market_makers)
         self.lam_mm = float(lam_mm)
         self.mm_xi = float(mm_xi)
         self.mm_K = int(mm_K)
         self.mm_omega = float(mm_omega)
-
         self.seed_value = seed
         self.bg_latency = max(0, int(bg_latency))
         self.rl_latency = max(0, int(rl_latency))
-
+        self.bg_latency_mode = bg_latency_mode
+        self.rl_latency_mode = rl_latency_mode
+        self.latency_n = max(0, int(latency_n))
+        self.bg_latency_p = float(min(max(bg_latency_p, 0.0), 1.0))
+        self.rl_latency_p = float(min(max(rl_latency_p, 0.0), 1.0))
+        self.current_rl_latency = self.rl_latency
         self.fundamental_mode = fundamental_mode
-        self.synthetic_kappa = float(synthetic_kappa)
-        self.synthetic_sigma_scale = float(synthetic_sigma_scale)
-
+        self.historical_selected_idx = int(historical_selected_idx)
+        # self.synthetic_kappa = float(synthetic_kappa)
+        # self.synthetic_sigma_scale = float(synthetic_sigma_scale)
+        # self.historical_bundle_size = int(historical_bundle_size)
+        # self.interp_kappa = float(interp_kappa)
+        # self.interp_sigma_scale = float(interp_sigma_scale)
         self._rl_order_counter = 0
+        self.fundamental_weight = float(min(max(fundamental_weight, 0.0), 1.0))
 
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
+            torch.manual_seed(seed)
 
         self.rl_agent_id = 900_000
-        self.rl_agent = RLParticipationAgent(
-            agent_id=self.rl_agent_id,
-            tickers=self.tickers,
-            initial_cash=self.initial_cash,
-        )
+        self.rl_agent = RLParticipationAgent(agent_id=self.rl_agent_id, tickers=self.tickers, initial_cash=self.initial_cash)
 
         self.markets: Dict[str, Market] = {}
         self.background_agents: Dict[int, CrossAssetBackgroundAgent] = {}
@@ -112,11 +131,13 @@ class MultiAssetEnv(gym.Env):
         self.arrivals_bg = defaultdict(list)
         self.arrival_times_bg = None
         self.arrival_idx_bg = 0
+        self.pending_bg_orders = defaultdict(list)
 
         self.arrivals_rl = defaultdict(list)
         self.arrival_times_rl = None
         self.arrival_idx_rl = 0
-
+        self.pending_rl_orders = defaultdict(list)
+        
         self.time = 0
         self.decision_event_count = 0
         self.last_net_worth = None
@@ -133,11 +154,19 @@ class MultiAssetEnv(gym.Env):
             high=np.inf,
             shape=(obs_dim,),
             dtype=np.float32,
-        )
+        )      
+
         #self.action_space = spaces.Discrete(5)
         self.action_space = spaces.Discrete(1 + 2 * len(self.tickers))
 
         self._build_env()
+
+    def _sample_rl_latency(self) -> int:
+        if self.rl_latency_mode == "fixed":
+            self.current_rl_latency = int(self.rl_latency)
+        else:
+            self.current_rl_latency = int(np.random.binomial(self.latency_n, self.rl_latency_p))
+        return self.current_rl_latency
 
     def _make_fundamental(self, ticker: str):
         ref_prices = np.asarray(self.historical_series[ticker], dtype=float)
@@ -146,32 +175,13 @@ class MultiAssetEnv(gym.Env):
         if len(ref_prices) == 0:
             raise ValueError(f"No valid prices available for ticker {ticker}.")
 
+        if self.fundamental_mode == "historical_constant":
+            return ConstantHistoricalFundamental(prices=ref_prices, final_time=self.sim_time, selected_idx=self.historical_selected_idx)
+
         if self.fundamental_mode == "historical":
             return HistoricalFundamental(prices=ref_prices, final_time=self.sim_time)
 
-        # synthetic = Gaussian mean-reverting process calibrated loosely to the
-        # scale of the historical series
-        mean = float(np.mean(ref_prices))
-
-        if len(ref_prices) > 1:
-            log_rets = np.diff(np.log(np.maximum(ref_prices, 1e-8)))
-            ret_var = float(np.var(log_rets))
-            # convert return-scale variation to price-scale shock variance
-            shock_var = ret_var * (mean ** 2)
-        else:
-            shock_var = (0.01 * mean) ** 2
-
-        shock_var = max(shock_var * self.synthetic_sigma_scale, 1e-8)
-
-        # GaussianMeanReverting allocates exactly `final_time` slots, so use
-        # sim_time + 1 to allow indexing from t=0,...,sim_time
-        return GaussianMeanReverting(
-            final_time=self.sim_time + 1,
-            mean=mean,
-            r=self.synthetic_kappa,
-            shock_var=shock_var,
-            shock_mean=0.0,
-        )
+        raise ValueError(f"Unsupported fundamental_mode: {self.fundamental_mode}")
 
     def _build_env(self):
         self.markets = {}
@@ -186,16 +196,15 @@ class MultiAssetEnv(gym.Env):
                 mm_id = 800_000 + idx
                 self.mm_agent_ids[ticker] = mm_id
                 self.market_makers[ticker] = MMAgent(
-                    agent_id=mm_id,
-                    market=self.markets[ticker],
-                    xi=self.mm_xi,
-                    K=self.mm_K,
-                    omega=self.mm_omega,
-                )
-
+                    agent_id=mm_id, 
+                    market=self.markets[ticker], 
+                    xi=self.mm_xi, 
+                    K=self.mm_K, 
+                    omega=self.mm_omega
+                    )
         self.arrivals_mm = defaultdict(list)
         if self.use_market_makers:
-            self.arrival_times_mm = sample_arrivals_numpy(self.lam_mm, 10000)
+            self.arrival_times_mm = sample_arrivals(self.lam_mm, 10000)
             self.arrival_idx_mm = 0
             for ticker in self.tickers:
                 next_t = int(self.arrival_times_mm[self.arrival_idx_mm]) + 1
@@ -216,17 +225,19 @@ class MultiAssetEnv(gym.Env):
                 eta=1.0,
                 initial_cash=self.initial_cash,
                 latency=self.bg_latency,
+                latency_mode=self.bg_latency_mode,
+                latency_n=self.latency_n,
+                latency_p=self.bg_latency_p
             )
-
         self.arrivals_bg = defaultdict(list)
-        self.arrival_times_bg = sample_arrivals_numpy(self.lam_bg, 10000)
+        self.arrival_times_bg = sample_arrivals(self.lam_bg, 10000)
         self.arrival_idx_bg = 0
         for agent_id in range(self.num_background_agents):
             self.arrivals_bg[int(self.arrival_times_bg[self.arrival_idx_bg])].append(agent_id)
             self.arrival_idx_bg += 1
 
         self.arrivals_rl = defaultdict(list)
-        self.arrival_times_rl = sample_arrivals_numpy(self.lam_rl, 10000)
+        self.arrival_times_rl = sample_arrivals(self.lam_rl, 10000)
         self.arrival_idx_rl = 0
         self.arrivals_rl[int(self.arrival_times_rl[self.arrival_idx_rl])].append(self.rl_agent_id)
         self.arrival_idx_rl += 1
@@ -236,7 +247,7 @@ class MultiAssetEnv(gym.Env):
             return
 
         if self.arrival_idx_mm >= len(self.arrival_times_mm):
-            self.arrival_times_mm = sample_arrivals_numpy(self.lam_mm, 10000)
+            self.arrival_times_mm = sample_arrivals(self.lam_mm, 10000)
             self.arrival_idx_mm = 0
 
         next_t = int(self.arrival_times_mm[self.arrival_idx_mm]) + 1 + self.time
@@ -282,11 +293,15 @@ class MultiAssetEnv(gym.Env):
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
+            torch.manual_seed(seed)
 
         self.time = 0
         self.decision_event_count = 0
         self.rl_agent.reset()
         self._build_env()
+
+        self.pending_bg_orders = defaultdict(list)
+        self.pending_rl_orders = defaultdict(list)
 
         self._seed_market_makers_at_t0()
 
@@ -297,6 +312,19 @@ class MultiAssetEnv(gym.Env):
         self.last_step_matched_counts = {ticker: 0 for ticker in self.tickers}
 
         return self._get_obs(), {}
+
+    def _release_pending_orders_for_current_time(self):
+        # background orders
+        bg_orders_now = self.pending_bg_orders[self.time]
+        for ticker, order in bg_orders_now:
+            self.markets[ticker].event_queue.set_time(self.time)
+            self.markets[ticker].add_orders([order])
+
+        # RL orders
+        rl_orders_now = self.pending_rl_orders[self.time]
+        for ticker, order in rl_orders_now:
+            self.markets[ticker].event_queue.set_time(self.time)
+            self.markets[ticker].add_orders([order])
 
     def step(self, action: int):
         if self.time >= self.sim_time or self.decision_event_count >= self.max_decision_events:
@@ -314,6 +342,7 @@ class MultiAssetEnv(gym.Env):
             invalid, order_submitted, submitted_order_id = self._execute_rl_action(action)
             self._schedule_next_rl_arrival()
 
+        self._release_pending_orders_for_current_time()
         rl_filled_order_ids = self._process_all_markets_for_current_time()
 
         order_filled = int(submitted_order_id is not None and submitted_order_id in rl_filled_order_ids)
@@ -334,13 +363,14 @@ class MultiAssetEnv(gym.Env):
             "time": self.time,
             "order_submitted": order_submitted,
             "order_filled": order_filled,
+            "rl_latency": int(self.current_rl_latency),
         }
 
         return self._get_obs(), float(reward), terminated, False, info
 
     def _schedule_next_bg_arrival(self, agent_id: int):
         if self.arrival_idx_bg >= len(self.arrival_times_bg):
-            self.arrival_times_bg = sample_arrivals_numpy(self.lam_bg, 10000)
+            self.arrival_times_bg = sample_arrivals(self.lam_bg, 10000)
             self.arrival_idx_bg = 0
 
         next_t = int(self.arrival_times_bg[self.arrival_idx_bg]) + 1 + self.time
@@ -349,7 +379,7 @@ class MultiAssetEnv(gym.Env):
 
     def _schedule_next_rl_arrival(self):
         if self.arrival_idx_rl >= len(self.arrival_times_rl):
-            self.arrival_times_rl = sample_arrivals_numpy(self.lam_rl, 10000)
+            self.arrival_times_rl = sample_arrivals(self.lam_rl, 10000)
             self.arrival_idx_rl = 0
 
         next_t = int(self.arrival_times_rl[self.arrival_idx_rl]) + 1 + self.time
@@ -360,19 +390,17 @@ class MultiAssetEnv(gym.Env):
         """
         Submit the RL action as a real limit order into the LOB.
 
-        Returns
-        -------
-        invalid : int
-            1 if the action is invalid, else 0
-        order_submitted : int
-            1 if an RL order was submitted to the book, else 0
-        submitted_order_id : int | None
-            The RL order id if submitted, else None
+        Returns:
+            invalid : int
+                1 if the action is invalid, else 0
+            order_submitted : int
+                1 if an RL order was submitted to the book, else 0
+            submitted_order_id : int | None
+                The RL order id if submitted, else None
         """
         self._cancel_rl_orders()
 
-        if action == 0:
-            return 0, 0, None
+        if action == 0: return 0, 0, None
 
         # if action == 1:
         #     ticker = self.tickers[0]
@@ -390,8 +418,7 @@ class MultiAssetEnv(gym.Env):
         #     return 1, 0, None
         
         asset_idx = (action - 1) // 2
-        if asset_idx < 0 or asset_idx >= len(self.tickers):
-            return 1, 0, None
+        if asset_idx < 0 or asset_idx >= len(self.tickers): return 1, 0, None
         
         ticker = self.tickers[asset_idx]
         side = BUY if (action - 1) % 2 == 0 else SELL
@@ -441,7 +468,11 @@ class MultiAssetEnv(gym.Env):
             order_id=order_id,
         )
 
-        market.add_orders([order])
+        #market.add_orders([order])
+        submit_delay = int(self.current_rl_latency)
+        arrival_time = min(self.time + submit_delay, self.sim_time)
+        
+        self.pending_rl_orders[arrival_time].append((ticker, order))
 
         return 0, 1, order_id
 
@@ -457,8 +488,11 @@ class MultiAssetEnv(gym.Env):
             choice = agent.choose_action(self.markets)
             if choice is not None:
                 ticker, order = choice
-                self.markets[ticker].add_orders([order])
-
+                #self.markets[ticker].add_orders([order])
+                submit_delay = int(getattr(agent, "current_latency", getattr(agent, "latency", 0)))
+                arrival_time = min(self.time + submit_delay, self.sim_time)
+                self.pending_bg_orders[arrival_time].append((ticker, order))
+                
             self._schedule_next_bg_arrival(agent_id)
 
     def _process_all_markets_for_current_time(self):
@@ -491,8 +525,12 @@ class MultiAssetEnv(gym.Env):
         while self.time < self.sim_time and len(self.arrivals_rl[self.time]) == 0:
             self._process_market_makers_for_current_time()
             self._process_background_agents_for_current_time()
+            self._release_pending_orders_for_current_time()
             self._process_all_markets_for_current_time()
             self.time += 1
+
+        if self.time < self.sim_time:
+            self._sample_rl_latency()
 
         return self.time >= self.sim_time
 
@@ -512,7 +550,7 @@ class MultiAssetEnv(gym.Env):
 
     def _get_rl_market_observation(self, ticker: str) -> dict:
         market = self.markets[ticker]
-        return market.get_observation(latency_steps=self.rl_latency)
+        return market.get_observation(latency_steps=self.current_rl_latency)
 
     def _safe_metric(self, fn, market: Market) -> float:
         try:
@@ -551,23 +589,15 @@ class MultiAssetEnv(gym.Env):
 
             scale = max(float(self.historical_series[ticker][0]), 1e-8)
 
-            obs.extend([
-                fundamental / scale,
-                float(best_bid) / scale,
-                float(best_ask) / scale,
-                inv,
-                mpm,
-                vol,
-                rsi,
-            ])
+            obs.extend([fundamental / scale, float(best_bid) / scale, float(best_ask) / scale, inv, mpm, vol, rsi])
 
         obs = np.asarray(obs, dtype=np.float32)
         obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+
         return np.asarray(obs, dtype=np.float32)
 
-    # ------------------------------------------------------------------
+
     # Snapshot helpers for logging / later distributional analysis
-    # ------------------------------------------------------------------
 
     def get_market_snapshot(self, episode: int | None = None) -> List[dict]:
         rows = []
@@ -595,7 +625,9 @@ class MultiAssetEnv(gym.Env):
                 "midprice": float(mid),
                 "spread": spread,
                 "matched_orders": int(self.last_step_matched_counts.get(ticker, 0)),
+                "full_lob": market.order_book.snapshot_full(),
             })
+            
         return rows
 
     def get_agent_snapshot(self, episode: int | None = None) -> List[dict]:
@@ -608,7 +640,7 @@ class MultiAssetEnv(gym.Env):
             "time": int(self.time),
             "agent_id": int(self.rl_agent_id),
             "agent_type": "rl",
-            "latency": int(self.rl_latency),
+            "latency": int(self.current_rl_latency),
             "cash": float(self.rl_agent.cash),
             "net_worth": float(self.rl_agent.net_worth(marks)),
         }
@@ -625,7 +657,7 @@ class MultiAssetEnv(gym.Env):
                 "time": int(self.time),
                 "agent_id": int(agent_id),
                 "agent_type": "background",
-                "latency": int(getattr(agent, "latency", 0)),
+                "latency": int(getattr(agent, "current_latency", getattr(agent, "latency", 0))),
                 "cash": float(agent.cash),
                 "net_worth": float(agent.net_worth(marks)),
             }

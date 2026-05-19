@@ -9,8 +9,7 @@ import numpy as np
 
 class FourHeap:
     """
-    This class reimplements the four-heap data structure described in "Flexible double auctions for electronic commerce:
-    theory and implementation" (Wurman, 98)
+    This class reimplements the four-heap data structure described in "Flexible double auctions for electronic commerce: theory and implementation" (Wurman, 98)
     """
     def __init__(self, plus_one=False):
         self.plus_one = plus_one
@@ -218,3 +217,38 @@ class FourHeap:
             s += f'Number of orders: {heap.count()}\n\n\n'
 
         return s
+
+    def _serialize_queue(self, queue) -> list[dict]:
+        """
+        Serialize all live orders in one queue. 
+        Returned in heap order (best first, then heap order).
+        """
+        rows = []
+        for _, order_id in queue.heap:
+            if order_id in queue.deleted_ids:
+                continue
+            if order_id not in queue.order_dict:
+                continue
+
+            order = queue.order_dict[order_id]
+            rows.append({
+                "price": float(order.price),
+                "order_type": int(order.order_type),
+                "quantity": float(order.quantity),
+                "agent_id": int(order.agent_id),
+                "time": int(order.time),
+                "order_id": int(order.order_id),
+                "asset_id": int(order.asset_id),
+            })
+        return rows
+
+    def snapshot_full(self) -> dict:
+        """
+        Full serializable snapshot of the four-heap book state.
+        """
+        return {
+            "buy_unmatched": self._serialize_queue(self.buy_unmatched),
+            "sell_unmatched": self._serialize_queue(self.sell_unmatched),
+            "buy_matched": self._serialize_queue(self.buy_matched),
+            "sell_matched": self._serialize_queue(self.sell_matched),
+        }

@@ -1,28 +1,24 @@
-import json
 import os
-from datetime import datetime
+import json
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, Any, List
 
 import numpy as np
 import torch
 
-
 from marketsim.data.load_historical import load_multi_asset_series
-#from marketsim.data.load_historical import load_two_asset_series
+from marketsim.wrappers.multi_asset_wrapper import MultiAssetEnv
 from marketsim.rl.dqn_agent import DQNAgent, DQNConfig
 from marketsim.rl.replay_buffer import ReplayBuffer
-from marketsim.wrappers.multi_asset_wrapper import MultiAssetEnv
 
 
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
-
 def append_jsonl(path: str, record: dict):
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
-
 
 def summarize_run(summary_path: str) -> dict:
     records = []
@@ -62,7 +58,6 @@ def summarize_run(summary_path: str) -> dict:
         "mean_net_worth_last": mean_of("final_net_worth", last),
     }
     return summary
-
 
 def derive_run_metrics(
     market_log_path: str | None = None,
@@ -123,16 +118,15 @@ def derive_run_metrics(
 
     return out
 
-
 def train(
     #ticker_a="AAPL",
     #ticker_b="XOM",
     tickers: list[str] | None = None,
-    sim_time=200,
-    max_decision_events=100,
+    sim_time=1100,  # 1950 for full day, 1100 for easing computation
+    max_decision_events=550,  # 975,
     num_background_agents=25,
-    lam_bg=0.10,
-    lam_rl=0.05,
+    lam_bg=0.14,
+    lam_rl=0.07,
     q_max=10,
     pv_var=1.0,
     zi_shade=(0.05, 0.5),
@@ -140,44 +134,48 @@ def train(
     lambda_invalid=1.0,
     bg_latency=0,
     rl_latency=0,
+    bg_latency_mode: str = "fixed",
+    rl_latency_mode: str = "fixed",
+    latency_n: int = 3,
+    bg_latency_p: float = 0.4,
+    rl_latency_p: float = 0.4,
     gamma=0.99,
     lr=5e-4,
     batch_size=64,
     target_update_freq=1000,
     learning_starts=500,
-    train_freq=4,
+    train_freq=1,
     epsilon_start=1.0,
     epsilon_end=0.05,
     epsilon_decay_steps=5000,
     grad_clip=10.0,
     replay_capacity=100_000,
-    episodes=1000,
+    episodes=300,  #1000,
     checkpoint_every=0,
     seed=42,
     run_tag=None,
     use_market_makers=True,
-    lam_mm=0.10,
+    lam_mm=0.14,
     mm_xi=0.5,
     mm_K=3,
     mm_omega=2.0,
-    fundamental_mode: str = "historical",   # "historical" or "synthetic"
-    synthetic_kappa: float = 0.05,
-    synthetic_sigma_scale: float = 0.02,
+    fundamental_mode: str = "historical_constant",   # "historical" or "synthetic"
+    historical_selected_idx: int = 0,  # for the constant mode, which historical price to use as the constant fundamental
+    fundamental_weight: float = 1.0,    
+    # synthetic_kappa: float = 0.05,
+    # synthetic_sigma_scale: float = 0.02,
+    # historical_bundle_size: int = 390,
+    # interp_kappa: float = 0.05,
+    # interp_sigma_scale: float = 0.02,
     log_market: bool = True,
     log_agents: bool = True,
     output_root: str = "runs",
 ):
-    csv_path = r"R:\sescott1\Masters\thesis\potential_codes\StockMARL\Stock-MARL-main\resources\datasets\train_dataV1.csv"
+    #csv_path = r"R:\sescott1\Masters\thesis\potential_codes\StockMARL\Stock-MARL-main\resources\datasets\train_dataV1.csv"
+    csv_path = r"C:\Users\sagarwal4\Downloads\pymarketsim-master\pymarketsim-master\sarah\train_dataV1.csv"
 
     if tickers is None:
         tickers = ["AAPL", "XOM"]
-
-    # historical_series = load_two_asset_series(
-    #     csv_path=csv_path,
-    #     ticker_a=ticker_a,
-    #     ticker_b=ticker_b,
-    #     sim_time=sim_time,
-    # )
 
     historical_series = load_multi_asset_series(
         csv_path=csv_path,
@@ -189,7 +187,6 @@ def train(
     if run_tag is None:
         run_tag = "manual"
 
-    #run_name = f"dqn_{ticker_a}_{ticker_b}_{run_tag}_{timestamp}"
     ticker_tag = "_".join(tickers)
     run_name = f"dqn_{ticker_tag}_{run_tag}_{timestamp}"
     out_dir = os.path.join(output_root, run_name)
@@ -198,8 +195,6 @@ def train(
     print("Saving outputs to:", os.path.abspath(out_dir))
 
     config_record = {
-        #"ticker_a": ticker_a,
-        #"ticker_b": ticker_b,
         "tickers": tickers,
         "csv_path": csv_path,
         "sim_time": sim_time,
@@ -214,6 +209,11 @@ def train(
         "lambda_invalid": lambda_invalid,
         "bg_latency": bg_latency,
         "rl_latency": rl_latency,
+        "bg_latency_mode": bg_latency_mode,
+        "rl_latency_mode": rl_latency_mode,
+        "latency_n": latency_n,
+        "bg_latency_p": bg_latency_p,
+        "rl_latency_p": rl_latency_p,
         "gamma": gamma,
         "lr": lr,
         "batch_size": batch_size,
@@ -235,8 +235,13 @@ def train(
         "mm_K": mm_K,
         "mm_omega": mm_omega,
         "fundamental_mode": fundamental_mode,
-        "synthetic_kappa": synthetic_kappa,
-        "synthetic_sigma_scale": synthetic_sigma_scale,
+        "historical_selected_idx": historical_selected_idx,
+        "fundamental_weight": fundamental_weight,
+        # "synthetic_kappa": synthetic_kappa,
+        # "synthetic_sigma_scale": synthetic_sigma_scale,
+        # "historical_bundle_size": historical_bundle_size,
+        # "interp_kappa": interp_kappa,
+        # "interp_sigma_scale": interp_sigma_scale,    
         "log_market": log_market,
         "log_agents": log_agents,
         "output_root": output_root,
@@ -265,9 +270,19 @@ def train(
         seed=seed,
         bg_latency=bg_latency,
         rl_latency=rl_latency,
+        bg_latency_mode=bg_latency_mode,
+        rl_latency_mode=rl_latency_mode,
+        latency_n=latency_n,
+        bg_latency_p=bg_latency_p,
+        rl_latency_p=rl_latency_p,
         fundamental_mode=fundamental_mode,
-        synthetic_kappa=synthetic_kappa,
-        synthetic_sigma_scale=synthetic_sigma_scale,
+        historical_selected_idx=historical_selected_idx,
+        fundamental_weight=fundamental_weight,
+        # synthetic_kappa=synthetic_kappa,
+        # synthetic_sigma_scale=synthetic_sigma_scale,
+        # historical_bundle_size=historical_bundle_size,
+        # interp_kappa=interp_kappa,
+        # interp_sigma_scale=interp_sigma_scale,
     )
 
     state_dim = env.observation_space.shape[0]
@@ -370,10 +385,7 @@ def train(
         if checkpoint_every > 0 and (episode + 1) % checkpoint_every == 0:
             dqn.save(os.path.join(out_dir, f"checkpoint_ep_{episode+1}.pt"))
 
-        print(
-            f"Ep {episode:04d} | Return {ep_return:10.4f} | Steps {ep_steps:3d} "
-            f"| Invalid {invalid_count:3d} | Eps {dqn.epsilon():.4f} | Loss {avg_loss}"
-        )
+        print(f"Ep {episode:04d} | Return {ep_return:10.4f} | Steps {ep_steps:3d} | Invalid {invalid_count:3d} | Eps {dqn.epsilon():.4f} | Loss {avg_loss}")
 
     summary = summarize_run(episode_log_path)
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as f:
@@ -399,7 +411,6 @@ def train(
         "config": config_record,
     }
 
-
 def _run_grid(grid: List[dict], base_kwargs: dict) -> List[dict]:
     results = []
     for params in grid:
@@ -414,17 +425,175 @@ def _run_grid(grid: List[dict], base_kwargs: dict) -> List[dict]:
         })
     return results
 
+def run_latency_only_doe(output_root="runs_latency_only"):
+    """
+    2-condition DOE:
+      1) no latency
+      2) stochastic latency
+    Constant historical fundamental only.
+    Full LOB logging kept on.
+    """
+    base_kwargs = dict(
+        tickers=["AAPL", "META", "V", "XOM"],
+        sim_time=1100,
+        max_decision_events=975,
+        num_background_agents=25,
+        lam_bg=0.10,
+        lam_rl=0.05,
+        q_max=10,
+        pv_var=1.0,
+        zi_shade=(0.05, 0.5),
+        initial_cash=100_000.0,
+        lambda_invalid=1.0,
+        gamma=0.99,
+        lr=5e-4,
+        batch_size=64,
+        target_update_freq=1000,
+        learning_starts=500,
+        train_freq=1,
+        epsilon_start=1.0,
+        epsilon_end=0.05,
+        epsilon_decay_steps=5000,
+        grad_clip=10.0,
+        replay_capacity=100_000,
+        episodes=300,
+        checkpoint_every=0,
+        use_market_makers=True,
+        lam_mm=0.10,
+        mm_xi=0.5,
+        mm_K=3,
+        mm_omega=2.0,
+        fundamental_mode="historical_constant",
+        historical_selected_idx=0,
+        fundamental_weight=0.5,
+        log_market=True,
+        log_agents=True,
+        output_root=output_root,
+    )
+
+    grid = [
+        {
+            "run_tag": "nolat",
+            "bg_latency": 0,
+            "rl_latency": 0,
+            "bg_latency_mode": "fixed",
+            "rl_latency_mode": "fixed",
+        },
+        {
+            "run_tag": "stochlat",
+            "bg_latency_mode": "stochastic",
+            "rl_latency_mode": "stochastic",
+            "latency_n": 100,
+            "bg_latency_p": 0.02,
+            "rl_latency_p": 0.02,
+        },
+    ]
+
+    return _run_grid(grid, base_kwargs)
+
+def run_minute_fundamental_latency_doe(output_root="runs_minute_fundamental_latency"):
+    """
+    6-run Cartesian DOE:
+      latency in {no latency, stochastic latency}
+      fundamental in {historical_piecewise, historical_interpolated, synthetic}
+    """
+    base_kwargs = dict(
+        tickers=["AAPL", "META", "V", "XOM"],
+        sim_time=1950,
+        max_decision_events=975,
+        num_background_agents=25,
+        lam_bg=0.14,
+        lam_rl=0.07,
+        q_max=10,
+        pv_var=1.0,
+        zi_shade=(0.05, 0.5),
+        initial_cash=100_000.0,
+        lambda_invalid=1.0,
+        gamma=0.99,
+        lr=5e-4,
+        batch_size=64,
+        target_update_freq=1000,
+        learning_starts=500,
+        train_freq=1,
+        epsilon_start=1.0,
+        epsilon_end=0.05,
+        epsilon_decay_steps=5000,
+        grad_clip=10.0,
+        replay_capacity=100_000,
+        episodes=1000,
+        checkpoint_every=0,
+        seed=42,
+        use_market_makers=True,
+        lam_mm=0.14,
+        mm_xi=0.5,
+        mm_K=3,
+        mm_omega=2.0,
+        historical_bundle_size=390,
+        interp_kappa=0.05,
+        interp_sigma_scale=0.02,
+        latency_n=3,
+        bg_latency_p=0.4,
+        rl_latency_p=0.4,
+        log_market=True,
+        log_agents=True,
+        output_root=output_root,
+    )
+
+    grid = [
+        {
+            "run_tag": "piecewise_nolat",
+            "fundamental_mode": "historical_piecewise",
+            "bg_latency": 0,
+            "rl_latency": 0,
+            "bg_latency_mode": "fixed",
+            "rl_latency_mode": "fixed",
+        },
+        {
+            "run_tag": "piecewise_stochlat",
+            "fundamental_mode": "historical_piecewise",
+            "bg_latency_mode": "stochastic",
+            "rl_latency_mode": "stochastic",
+        },
+        {
+            "run_tag": "interp_nolat",
+            "fundamental_mode": "historical_interpolated",
+            "bg_latency": 0,
+            "rl_latency": 0,
+            "bg_latency_mode": "fixed",
+            "rl_latency_mode": "fixed",
+        },
+        {
+            "run_tag": "interp_stochlat",
+            "fundamental_mode": "historical_interpolated",
+            "bg_latency_mode": "stochastic",
+            "rl_latency_mode": "stochastic",
+        },
+        {
+            "run_tag": "synthetic_nolat",
+            "fundamental_mode": "synthetic",
+            "bg_latency": 0,
+            "rl_latency": 0,
+            "bg_latency_mode": "fixed",
+            "rl_latency_mode": "fixed",
+        },
+        {
+            "run_tag": "synthetic_stochlat",
+            "fundamental_mode": "synthetic",
+            "bg_latency_mode": "stochastic",
+            "rl_latency_mode": "stochastic",
+        },
+    ]
+
+    return _run_grid(grid, base_kwargs)
 
 def run_rl_parameter_doe(output_root="runs_rl_param"):
     """
     (c) RL parameter sensitivity.
     """
     base_kwargs = dict(
-        #ticker_a="AAPL",
-        #ticker_b="XOM",
         tickers=["AAPL", "META", "V", "XOM"],
-        sim_time=200,
-        max_decision_events=100,
+        sim_time=1950,
+        max_decision_events=975,
         num_background_agents=25,
         lam_bg=0.10,
         lam_rl=0.05,
@@ -460,20 +629,17 @@ def run_rl_parameter_doe(output_root="runs_rl_param"):
     ]
     return _run_grid(grid, base_kwargs)
 
-
 def run_latency_doe(output_root="runs_latency"):
     """
     (b) latency vs no latency, keeping historical fundamental.
     """
     base_kwargs = dict(
-        #icker_a="AAPL",
-        #ticker_b="XOM",
         tickers=["AAPL", "META", "V", "XOM"],
-        sim_time=200,
-        max_decision_events=100,
+        sim_time=1950,
+        max_decision_events=975,
         num_background_agents=25,
-        lam_bg=0.10,
-        lam_rl=0.05,
+        lam_bg=0.14,
+        lam_rl=0.07,
         q_max=10,
         pv_var=1.0,
         zi_shade=(0.05, 0.5),
@@ -504,18 +670,15 @@ def run_latency_doe(output_root="runs_latency"):
     ]
     return _run_grid(grid, base_kwargs)
 
-
 def run_fundamental_doe(output_root="runs_fundamental"):
     """
     (a) synthetic vs historical fundamental.
     Uses a fixed RL setting.
     """
     base_kwargs = dict(
-        #ticker_a="AAPL",
-        #ticker_b="XOM",
         tickers=["AAPL", "META", "V", "XOM"],
-        sim_time=200,
-        max_decision_events=100,
+        sim_time=1950,
+        max_decision_events=975,
         num_background_agents=25,
         lam_bg=0.10,
         lam_rl=0.05,
@@ -550,17 +713,14 @@ def run_fundamental_doe(output_root="runs_fundamental"):
     ]
     return _run_grid(grid, base_kwargs)
 
-
 def run_fundamental_latency_doe(output_root="runs_fundamental_latency"):
     """
     (d) combination of (a) and (b): historical/synthetic x latency/no-latency
     """
     base_kwargs = dict(
-        #ticker_a="AAPL",
-        #ticker_b="XOM",
         tickers=["AAPL", "META", "V", "XOM"],
-        sim_time=200,
-        max_decision_events=100,
+        sim_time=1950,
+        max_decision_events=975,
         num_background_agents=25,
         lam_bg=0.10,
         lam_rl=0.05,
@@ -595,6 +755,81 @@ def run_fundamental_latency_doe(output_root="runs_fundamental_latency"):
     ]
     return _run_grid(grid, base_kwargs)
 
+def run_latency_only_repetitions(output_root="runs_latency_only_reps", repetitions=15, base_seed=42):
+    """
+    Run 15 repetitions per condition with different seeds.
+    Returns a list of summary dictionaries.
+    """
+    all_results = []
+
+    for rep in range(repetitions):
+        rep_seed = base_seed + rep
+        rep_out = f"{output_root}/rep_{rep:02d}"
+
+        results = _run_grid(
+            grid=[
+                {
+                    "run_tag": f"nolat_rep{rep:02d}",
+                    "bg_latency": 0,
+                    "rl_latency": 0,
+                    "bg_latency_mode": "fixed",
+                    "rl_latency_mode": "fixed",
+                },
+                {
+                    "run_tag": f"stochlat_rep{rep:02d}",
+                    "bg_latency_mode": "stochastic",
+                    "rl_latency_mode": "stochastic",
+                    "latency_n": 100,
+                    "bg_latency_p": 0.02,
+                    "rl_latency_p": 0.02,
+                },
+            ],
+            base_kwargs=dict(
+                tickers=["AAPL", "META", "V", "XOM"],
+                sim_time=1100,
+                max_decision_events=975,
+                num_background_agents=25,
+                lam_bg=0.10,
+                lam_rl=0.05,
+                q_max=10,
+                pv_var=1.0,
+                zi_shade=(0.05, 0.5),
+                initial_cash=100_000.0,
+                lambda_invalid=1.0,
+                gamma=0.99,
+                lr=5e-4,
+                batch_size=64,
+                target_update_freq=1000,
+                learning_starts=500,
+                train_freq=1,
+                epsilon_start=1.0,
+                epsilon_end=0.05,
+                epsilon_decay_steps=5000,
+                grad_clip=10.0,
+                replay_capacity=100_000,
+                episodes=300,
+                checkpoint_every=0,
+                seed=rep_seed,
+                use_market_makers=True,
+                lam_mm=0.10,
+                mm_xi=0.5,
+                mm_K=3,
+                mm_omega=2.0,
+                fundamental_mode="historical_constant",
+                historical_selected_idx=0,
+                fundamental_weight=0.5,
+                log_market=True,
+                log_agents=True,
+                output_root=rep_out,
+            )
+        )
+
+        for r in results:
+            r["rep"] = rep
+            r["seed"] = rep_seed
+            all_results.append(r)
+
+    return all_results
 
 if __name__ == "__main__":
     train()
